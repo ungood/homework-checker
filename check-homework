@@ -1,0 +1,171 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "httpx",
+#     "pydantic",
+#     "pydantic-settings",
+# ]
+# ///
+
+import asyncio
+import httpx
+from pydantic import *
+from pydantic_settings import *
+
+
+class Settings(BaseSettings, cli_prog_name="check-homework", cli_parse_args=True, cli_kebab_case=True):
+    canvas_url: str = Field(description="Canvas instance URL (e.g., https://canvas.instructure.com)")
+    canvas_api_key: str = Field(description="Canvas API access token")
+
+
+class Course(BaseModel):
+    id: int
+    name: str
+    course_code: str | None = None
+
+
+class Assignment(BaseModel):
+    id: int
+    name: str
+    due_at: str | None = None
+
+
+class Notification(BaseModel):
+    id: int
+    title: str | None = None
+    message: str | None = None
+    type: str | None = None
+
+    created_at: str | None = None
+    updated_at: str | None = None
+    workflow_state: str | None = None
+
+
+class Announcement(BaseModel):
+    id: int
+    title: str
+    message: str | None = None
+    read_state: str
+    posted_at: str | None = None
+    context_name: str | None = None
+
+
+class CanvasClient(httpx.AsyncClient):
+    def __init__(self, settings: Settings):
+        # Remove trailing slash from URL if present
+        self.canvas_url = settings.canvas_url.rstrip("/")
+
+        # Set up default headers
+        headers = {
+            "Authorization": f"Bearer {settings.canvas_api_key}",
+            "Accept": "application/json",
+        }
+
+        # Initialize AsyncClient with headers
+        super().__init__(headers=headers)
+
+    async def get_courses(self, enrollment_state: str = "active") -> list[Course]:
+        endpoint = f"{self.canvas_url}/api/v1/courses"
+
+        params = {
+            "enrollment_state": enrollment_state,
+            "per_page": 100,  # Get up to 100 courses per page
+        }
+
+        response = await self.get(endpoint, params=params)
+        response.raise_for_status()
+        return [Course.model_validate(course) for course in response.json()]
+
+    async def get_assignments(self, course_id: int, bucket: str = "upcoming") -> list[Assignment]:
+        endpoint = f"{self.canvas_url}/api/v1/courses/{course_id}/assignments"
+
+        params = {
+            "per_page": 100,
+            "bucket": bucket
+        }
+
+        response = await self.get(endpoint, params=params)
+        response.raise_for_status()
+        return [Assignment.model_validate(assignment) for assignment in response.json()]
+
+        # # Filter for incomplete assignments (not submitted or needs grading)
+        # incomplete = [
+        #     Assignment.model_validate(assignment) for assignment in assignments_data
+        #     if not assignment.get("has_submitted_submissions", False)
+        # ]
+
+    async def get_notifications(self, per_page: int = 10) -> list[Notification]:
+        """Get user's activity stream notifications"""
+        endpoint = f"{self.canvas_url}/api/v1/users/self/activity_stream"
+
+        params = {
+            "per_page": per_page,
+        }
+
+        response = await self.get(endpoint, params=params)
+        response.raise_for_status()
+        return [Notification.model_validate(notification) for notification in response.json()]
+
+    async def get_announcements(self, context_codes: list[str] | None = None, per_page: int = 10) -> list[Announcement]:
+        """Get announcements for the current user
+
+        Args:
+            context_codes: Optional list of context codes (e.g., ['course_123', 'course_456'])
+            per_page: Number of announcements to return per page
+        """
+        endpoint = f"{self.canvas_url}/api/v1/announcements"
+
+        params = {
+            "per_page": per_page,
+        }
+
+        if context_codes:
+            params["context_codes[]"] = context_codes
+
+        response = await self.get(endpoint, params=params)
+        response.raise_for_status()
+        return [Announcement.model_validate(announcement) for announcement in response.json()]
+
+
+async def main() -> None:
+    try:
+        settings = Settings()
+        async with CanvasClient(settings) as client:
+            # Test notifications
+            print("=== NOTIFICATIONS ===")
+            notifications = await client.get_notifications(per_page=5)
+            for notification in notifications:
+                print(f"[{notification.type}] {notification.title}")
+                print(f"  Created: {notification.created_at}")
+                print(f"  Message: {notification.message}")
+                print()
+
+            # Get courses first to use as context for announcements
+            courses = await client.get_courses()
+            context_codes = [f"course_{course.id}" for course in courses]
+
+            # Test announcements with course context codes
+            print("\n=== ANNOUNCEMENTS ===")
+            announcements = await client.get_announcements(context_codes=context_codes, per_page=5)
+            for announcement in announcements:
+                print(f"{announcement.title}")
+                print(f"  Posted: {announcement.posted_at}")
+                print(f"  Context: {announcement.context_name}")
+                print(f"  Read: {announcement.read_state}")
+                print(f"  Message: {announcement.message[:100] if announcement.message else 'N/A'}...")
+                print()
+
+            # Test courses and assignments
+            print("\n=== COURSES & ASSIGNMENTS ===")
+            for course in courses:
+                print(f"{course.name} (ID: {course.id})")
+                assignments = await client.get_assignments(course.id)
+                for assignment in assignments:
+                    print(f"\t{assignment.name} {assignment.due_at}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
