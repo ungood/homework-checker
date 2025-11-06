@@ -85,11 +85,41 @@ class CanvasClient(httpx.AsyncClient):
         # Initialize AsyncClient with headers
         super().__init__(headers=headers)
 
+    def _parse_link_header(self, link_header: str | None) -> str | None:
+        """Parse the Link header and extract the 'next' URL"""
+        if not link_header:
+            return None
+
+        # Link header format: <URL>; rel="next", <URL>; rel="prev"
+        links = link_header.split(',')
+        for link in links:
+            parts = link.split(';')
+            if len(parts) == 2:
+                url = parts[0].strip().strip('<>')
+                rel = parts[1].strip()
+                if 'rel="next"' in rel or "rel='next'" in rel:
+                    return url
+        return None
+
     async def _get_list(self, endpoint: str, model_class: type[T], params: dict | None = None) -> list[T]:
-        """Helper method to fetch a list of items and convert to domain objects"""
-        response = await self.get(endpoint, params=params)
-        response.raise_for_status()
-        return [model_class.model_validate(item) for item in response.json()]
+        """Helper method to fetch a list of items and convert to domain objects, with pagination support"""
+        results = []
+        url = endpoint
+
+        # Follow pagination links until there are no more pages
+        while url:
+            response = await self.get(url, params=params if url == endpoint else None)
+            response.raise_for_status()
+
+            # Add items from this page
+            page_items = response.json()
+            results.extend([model_class.model_validate(item) for item in page_items])
+
+            # Check for next page in Link header
+            link_header = response.headers.get('Link')
+            url = self._parse_link_header(link_header)
+
+        return results
 
     async def get_courses(self, enrollment_state: str = "active") -> list[Course]:
         endpoint = f"{self.canvas_url}/api/v1/courses"
