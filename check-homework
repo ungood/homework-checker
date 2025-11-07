@@ -5,15 +5,19 @@
 #     "httpx",
 #     "pydantic",
 #     "pydantic-settings",
+#     "rich",
 # ]
 # ///
 
 import asyncio
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TypeVar, AsyncIterator, Literal
 from pydantic import *
 from pydantic_settings import *
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
 
 T = TypeVar('T', bound=BaseModel)
 
@@ -108,63 +112,126 @@ class CanvasClient(httpx.AsyncClient):
             yield item
 
 
+def get_relative_time(dt: datetime | None) -> str:
+    """Get a human-readable relative time string."""
+    if not dt:
+        return "N/A"
+
+    now = datetime.now(timezone.utc)
+    delta = dt - now
+    days = delta.days
+
+    if days < 0:
+        return f"{abs(days)} days ago" if abs(days) != 1 else "1 day ago"
+    elif days == 0:
+        return "Today"
+    elif days == 1:
+        return "Tomorrow"
+    else:
+        return f"in {days} days"
+
+
+async def display_todos(console: Console, client: CanvasClient) -> None:
+    """Display TODO items in a Rich table."""
+    table = Table(title="TODO Items", show_header=True, header_style="bold cyan")
+    table.add_column("Type", style="dim")
+    table.add_column("Assignment")
+    table.add_column("URL", style="blue")
+
+    async for todo in client.get_todos():
+        type_color = "cyan" if todo.type == "submitting" else "magenta"
+        assignment_name = todo.assignment.name if todo.assignment else "N/A"
+
+        table.add_row(
+            f"[{type_color}]{todo.type}[/{type_color}]",
+            assignment_name,
+            todo.html_url or "N/A"
+        )
+
+    console.print(Panel(table, border_style="cyan"))
+
+
+async def display_missing_assignments(console: Console, client: CanvasClient) -> None:
+    """Display missing assignments in a Rich table."""
+    table = Table(title="Missing Assignments", show_header=True, header_style="bold red")
+    table.add_column("Assignment")
+    table.add_column("Due Date")
+    table.add_column("Status", style="dim")
+
+    async for assignment in client.get_missing_submissions():
+        relative = get_relative_time(assignment.due_at)
+        due_date_str = assignment.due_at.strftime("%Y-%m-%d %H:%M") if assignment.due_at else "N/A"
+
+        # Color code based on how overdue
+        if assignment.due_at:
+            days_overdue = (datetime.now(timezone.utc) - assignment.due_at).days
+            if days_overdue > 7:
+                name_style = "bold red"
+            elif days_overdue > 0:
+                name_style = "red"
+            else:
+                name_style = "yellow"
+        else:
+            name_style = "white"
+
+        table.add_row(
+            f"[{name_style}]{assignment.name}[/{name_style}]",
+            due_date_str,
+            relative
+        )
+
+    console.print(Panel(table, border_style="red"))
+
+
+async def display_upcoming_events(console: Console, client: CanvasClient) -> None:
+    """Display upcoming events in a Rich table."""
+    table = Table(title="Upcoming Events", show_header=True, header_style="bold green")
+    table.add_column("Event")
+    table.add_column("Start Date")
+    table.add_column("When", style="dim")
+    table.add_column("Context", style="dim")
+
+    async for event in client.get_upcoming_events():
+        relative = get_relative_time(event.start_at)
+        start_date_str = event.start_at.strftime("%Y-%m-%d %H:%M") if event.start_at else "N/A"
+
+        # Color code based on how soon
+        if event.start_at:
+            days_until = (event.start_at - datetime.now(timezone.utc)).days
+            if days_until <= 1:
+                title_style = "bold yellow"
+            elif days_until <= 7:
+                title_style = "yellow"
+            else:
+                title_style = "green"
+        else:
+            title_style = "white"
+
+        table.add_row(
+            f"[{title_style}]{event.title}[/{title_style}]",
+            start_date_str,
+            relative,
+            event.context_code or "N/A"
+        )
+
+    console.print(Panel(table, border_style="green"))
+
+
 async def main() -> None:
+    console = Console()
+
     try:
         settings = Settings()
         async with CanvasClient(settings) as client:
-            # Test user todos
-            print("=== TODO ITEMS ===")
-            async for todo in client.get_todos():
-                print(f"[{todo.type}] {todo.assignment.name if todo.assignment else 'N/A'}")
-                print(f"  URL: {todo.html_url}")
-                if todo.needs_grading_count:
-                    print(f"  Needs grading: {todo.needs_grading_count}")
-                print()
+            await display_todos(console, client)
+            console.print()  # Add spacing between panels
 
-            # Test missing submissions
-            print("\n=== MISSING SUBMISSIONS ===")
-            async for assignment in client.get_missing_submissions():
-                print(f"{assignment.name}")
-                print(f"  Due: {assignment.due_at}")
-                print()
+            await display_missing_assignments(console, client)
+            console.print()
 
-            # Test upcoming events
-            print("\n=== UPCOMING EVENTS ===")
-            async for event in client.get_upcoming_events():
-                print(f"{event.title}")
-                print(f"  Start: {event.start_at}")
-                print(f"  Context: {event.context_code}")
-                if event.assignment:
-                    print(f"  Assignment: {event.assignment.name}")
-                print()
-
-            # Test notifications
-            print("\n=== NOTIFICATIONS ===")
-            async for notification in client.get_activity_stream(per_page=5):
-                print(f"[{notification.type}] {notification.title}")
-                print(f"  Created: {notification.created_at}")
-                print()
-
-            # Get courses first to use as context for announcements
-            courses = [course async for course in client.get_courses()]
-            context_codes = [f"course_{course.id}" for course in courses]
-
-            # Test announcements with course context codes
-            print("\n=== ANNOUNCEMENTS ===")
-            async for announcement in client.get_announcements(context_codes=context_codes, per_page=5):
-                print(f"{announcement.title}")
-                print(f"  Posted: {announcement.posted_at}")
-                print(f"  Read: {announcement.read_state}")
-                print()
-
-            # Test courses and assignments
-            print("\n=== COURSES & ASSIGNMENTS ===")
-            for course in courses:
-                print(f"{course.name} (ID: {course.id})")
-                async for assignment in client.get_assignments(course.id):
-                    print(f"\t{assignment.name} {assignment.due_at}")
+            await display_upcoming_events(console, client)
     except Exception as e:
-        print(f"Error: {e}")
+        console.print(f"[bold red]Error:[/bold red] {e}")
 
 
 if __name__ == "__main__":
