@@ -10,7 +10,7 @@
 
 import asyncio
 import httpx
-from typing import TypeVar
+from typing import TypeVar, AsyncIterator
 from pydantic import *
 from pydantic_settings import *
 
@@ -73,107 +73,83 @@ class UpcomingEvent(BaseModel):
 
 class CanvasClient(httpx.AsyncClient):
     def __init__(self, settings: Settings):
-        # Remove trailing slash from URL if present
-        self.canvas_url = settings.canvas_url.rstrip("/")
-
         # Set up default headers
         headers = {
             "Authorization": f"Bearer {settings.canvas_api_key}",
             "Accept": "application/json",
         }
 
-        # Initialize AsyncClient with headers
-        super().__init__(headers=headers)
+        super().__init__(base_url=settings.canvas_url, headers=headers)
 
-    def _parse_link_header(self, link_header: str | None) -> str | None:
-        """Parse the Link header and extract the 'next' URL"""
-        if not link_header:
-            return None
-
-        # Link header format: <URL>; rel="next", <URL>; rel="prev"
-        links = link_header.split(',')
-        for link in links:
-            parts = link.split(';')
-            if len(parts) == 2:
-                url = parts[0].strip().strip('<>')
-                rel = parts[1].strip()
-                if 'rel="next"' in rel or "rel='next'" in rel:
-                    return url
-        return None
-
-    async def _get_list(self, endpoint: str, model_class: type[T], params: dict | None = None) -> list[T]:
-        """Helper method to fetch a list of items and convert to domain objects, with pagination support"""
-        results = []
+    async def _get_iterator(self, endpoint: str, model_class: type[T], per_page: int = 10, **kwargs) -> AsyncIterator[T]:
+        """Helper method to fetch and yield items with pagination support"""
         url = endpoint
+        params = {"per_page": per_page, **kwargs}
 
         # Follow pagination links until there are no more pages
         while url:
             response = await self.get(url, params=params if url == endpoint else None)
             response.raise_for_status()
 
-            # Add items from this page
+            # Yield items from this page
             page_items = response.json()
-            results.extend([model_class.model_validate(item) for item in page_items])
+            for item in page_items:
+                yield model_class.model_validate(item)
 
-            # Check for next page in Link header
-            link_header = response.headers.get('Link')
-            url = self._parse_link_header(link_header)
+            # Use httpx's built-in Link header parsing
+            url = response.links.get('next', {}).get('url')
 
-        return results
+    async def get_courses(self, enrollment_state: str = "active") -> AsyncIterator[Course]:
+        endpoint = "/api/v1/courses"
+        async for item in self._get_iterator(endpoint, Course, enrollment_state=enrollment_state):
+            yield item
 
-    async def get_courses(self, enrollment_state: str = "active") -> list[Course]:
-        endpoint = f"{self.canvas_url}/api/v1/courses"
-        params = {
-            "enrollment_state": enrollment_state,
-            "per_page": 100,
-        }
-        return await self._get_list(endpoint, Course, params)
+    async def get_assignments(self, course_id: int, bucket: str = "upcoming") -> AsyncIterator[Assignment]:
+        endpoint = f"/api/v1/courses/{course_id}/assignments"
+        async for item in self._get_iterator(endpoint, Assignment, bucket=bucket):
+            yield item
 
-    async def get_assignments(self, course_id: int, bucket: str = "upcoming") -> list[Assignment]:
-        endpoint = f"{self.canvas_url}/api/v1/courses/{course_id}/assignments"
-        params = {
-            "per_page": 100,
-            "bucket": bucket
-        }
-        return await self._get_list(endpoint, Assignment, params)
-
-    async def get_notifications(self, per_page: int = 10) -> list[Notification]:
+    async def get_notifications(self, per_page: int = 10) -> AsyncIterator[Notification]:
         """Get user's activity stream notifications"""
-        endpoint = f"{self.canvas_url}/api/v1/users/self/activity_stream"
-        params = {"per_page": per_page}
-        return await self._get_list(endpoint, Notification, params)
+        endpoint = "/api/v1/users/self/activity_stream"
+        async for item in self._get_iterator(endpoint, Notification, per_page=per_page):
+            yield item
 
-    async def get_announcements(self, context_codes: list[str] | None = None, per_page: int = 10) -> list[Announcement]:
+    async def get_announcements(self, context_codes: list[str] | None = None, per_page: int = 10) -> AsyncIterator[Announcement]:
         """Get announcements for the current user
 
         Args:
             context_codes: Optional list of context codes (e.g., ['course_123', 'course_456'])
             per_page: Number of announcements to return per page
         """
-        endpoint = f"{self.canvas_url}/api/v1/announcements"
-        params = {"per_page": per_page}
+        endpoint = "/api/v1/announcements"
+        kwargs = {"per_page": per_page}
         if context_codes:
-            params["context_codes[]"] = context_codes
-        return await self._get_list(endpoint, Announcement, params)
+            kwargs["context_codes[]"] = context_codes
+        async for item in self._get_iterator(endpoint, Announcement, **kwargs):
+            yield item
 
-    async def get_user_todos(self) -> list[TodoItem]:
+    async def get_user_todos(self) -> AsyncIterator[TodoItem]:
         """Get the current user's todo items"""
-        endpoint = f"{self.canvas_url}/api/v1/users/self/todo"
-        return await self._get_list(endpoint, TodoItem)
+        endpoint = "/api/v1/users/self/todo"
+        async for item in self._get_iterator(endpoint, TodoItem):
+            yield item
 
-    async def get_missing_submissions(self, user_id: str = "self") -> list[Assignment]:
+    async def get_missing_submissions(self, user_id: str = "self") -> AsyncIterator[Assignment]:
         """Get missing submissions for a user
 
         Args:
             user_id: User ID or 'self' for the current user
         """
-        endpoint = f"{self.canvas_url}/api/v1/users/{user_id}/missing_submissions"
-        return await self._get_list(endpoint, Assignment)
+        endpoint = f"/api/v1/users/{user_id}/missing_submissions"
+        async for item in self._get_iterator(endpoint, Assignment):
+            yield item
 
-    async def get_upcoming_events(self) -> list[UpcomingEvent]:
+    async def get_upcoming_events(self) -> AsyncIterator[UpcomingEvent]:
         """Get upcoming events for the current user"""
-        endpoint = f"{self.canvas_url}/api/v1/users/self/upcoming_events"
-        return await self._get_list(endpoint, UpcomingEvent)
+        endpoint = "/api/v1/users/self/upcoming_events"
+        async for item in self._get_iterator(endpoint, UpcomingEvent):
+            yield item
 
 
 async def main() -> None:
@@ -182,8 +158,7 @@ async def main() -> None:
         async with CanvasClient(settings) as client:
             # Test user todos
             print("=== TODO ITEMS ===")
-            todos = await client.get_user_todos()
-            for todo in todos:
+            async for todo in client.get_user_todos():
                 print(f"[{todo.type}] {todo.assignment.name if todo.assignment else 'N/A'}")
                 print(f"  URL: {todo.html_url}")
                 if todo.needs_grading_count:
@@ -192,16 +167,14 @@ async def main() -> None:
 
             # Test missing submissions
             print("\n=== MISSING SUBMISSIONS ===")
-            missing = await client.get_missing_submissions()
-            for assignment in missing:
+            async for assignment in client.get_missing_submissions():
                 print(f"{assignment.name}")
                 print(f"  Due: {assignment.due_at}")
                 print()
 
             # Test upcoming events
             print("\n=== UPCOMING EVENTS ===")
-            upcoming = await client.get_upcoming_events()
-            for event in upcoming:
+            async for event in client.get_upcoming_events():
                 print(f"{event.title}")
                 print(f"  Start: {event.start_at}")
                 print(f"  Context: {event.context_code}")
@@ -211,20 +184,18 @@ async def main() -> None:
 
             # Test notifications
             print("\n=== NOTIFICATIONS ===")
-            notifications = await client.get_notifications(per_page=5)
-            for notification in notifications:
+            async for notification in client.get_notifications(per_page=5):
                 print(f"[{notification.type}] {notification.title}")
                 print(f"  Created: {notification.created_at}")
                 print()
 
             # Get courses first to use as context for announcements
-            courses = await client.get_courses()
+            courses = [course async for course in client.get_courses()]
             context_codes = [f"course_{course.id}" for course in courses]
 
             # Test announcements with course context codes
             print("\n=== ANNOUNCEMENTS ===")
-            announcements = await client.get_announcements(context_codes=context_codes, per_page=5)
-            for announcement in announcements:
+            async for announcement in client.get_announcements(context_codes=context_codes, per_page=5):
                 print(f"{announcement.title}")
                 print(f"  Posted: {announcement.posted_at}")
                 print(f"  Read: {announcement.read_state}")
@@ -234,8 +205,7 @@ async def main() -> None:
             print("\n=== COURSES & ASSIGNMENTS ===")
             for course in courses:
                 print(f"{course.name} (ID: {course.id})")
-                assignments = await client.get_assignments(course.id)
-                for assignment in assignments:
+                async for assignment in client.get_assignments(course.id):
                     print(f"\t{assignment.name} {assignment.due_at}")
     except Exception as e:
         print(f"Error: {e}")
