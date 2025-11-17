@@ -46,6 +46,7 @@ class Assignment(BaseModel):
     name: str
     due_at: datetime | None = None
     course_id: int | None = None
+    has_submitted_submissions: bool = False
 
 
 class Quiz(BaseModel):
@@ -156,6 +157,10 @@ class HomeworkConsole(Console):
         table.add_column("Title")
 
         async for todo in self.client.get_todos():
+            # Skip todos that are "submitting" type but already have submissions
+            if todo.type == "submitting" and todo.assignment and todo.assignment.has_submitted_submissions:
+                continue
+
             course_name = self.courses.get(todo.course_id, "Unknown")
             assignment_name = todo.assignment.name if todo.assignment else "N/A"
 
