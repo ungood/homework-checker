@@ -13,6 +13,9 @@
 import asyncio
 import httpx
 import humanize
+import json
+import logging
+import sys
 from datetime import datetime, timezone
 from typing import TypeVar, AsyncIterator, Literal
 from pydantic import *
@@ -23,10 +26,13 @@ from rich.panel import Panel
 
 T = TypeVar('T', bound=BaseModel)
 
+logger = logging.getLogger(__name__)
+
 
 class Settings(BaseSettings, cli_prog_name="check-homework", cli_parse_args=True, cli_kebab_case=True):
     canvas_url: str = Field(description="Canvas instance URL (e.g., https://canvas.instructure.com)")
     canvas_api_key: str = Field(description="Canvas API access token")
+    debug: bool = Field(default=False, description="Enable debug logging")
 
 
 class Course(BaseModel):
@@ -86,6 +92,8 @@ class CanvasClient(httpx.AsyncClient):
             response.raise_for_status()
 
             page_items = response.json()
+            logger.debug(f"Received JSON response from {url}:\n{json.dumps(page_items, indent=2)}")
+
             for item in page_items:
                 yield model_class.model_validate(item)
 
@@ -238,6 +246,17 @@ async def main() -> None:
 
     try:
         settings = Settings()
+
+        # Configure logging to output to stderr
+        logging.basicConfig(
+            level=logging.WARNING,  # Set root logger to WARNING to suppress third-party logs
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            stream=sys.stderr
+        )
+
+        # Set our logger to DEBUG or INFO based on settings
+        logger.setLevel(logging.DEBUG if settings.debug else logging.INFO)
+
         async with CanvasClient(settings) as client:
             # Fetch courses first and create lookup dictionary
             courses = {course.id: course.name async for course in client.get_courses()}
