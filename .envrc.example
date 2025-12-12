@@ -1,0 +1,2 @@
+export canvas_url="https://evergreenschool.instructure.com/"
+export canvas_api_key="GET_YOUR_OWN_API_KEY_FROM_CANVAS_SETTINGS"
